@@ -1,198 +1,203 @@
 import tensorflow as tf
-import numpy as np
-
 import os
-import time
-
-from allocation.allocation import Allocation
-from ppo_environment import Environment, StateProcessor
-from ppo_model import PPO
-
-# global variables
-STATE_DIM = 100
-ACTION_DIM = 100
-EPSILON = 0.2  # clipped surrogate objective controlling
-GAMMA = 0.9  # reward discount
-CRITIC_LR = 1e-4
-ACTOR_LR = 1e-4
-CRITIC_UPDATE_STEPS = 5
-ACTOR_UPDATE_STEPS = 5
-BATCH_SIZE = 128  # batch size for training
-EPISODE_MAX = 200000  # max episode number
-EPISODE_LEN = 1000  # max episode length
-MODEL_SAVE_EPISODES = 10
 
 
-def valid_action(sess, state, ppo):
+class PPO:
     """
-    Judge the action is valid or not
-    :param sess: TensorFlow session
-    :param state: RL state
-    :param ppo: an PPO instance
-    :return:
+    Proximal Policy Optimization
     """
-    action_ppo = ppo.choose_action(sess=sess, states=state)
-    # action = decode_action_from_action_ppo(action_ppo)
-    if action_ppo[0] == 1:  # no action case
-        return action_ppo
+    def __init__(
+            self,
+            state_dim,
+            action_dim,
+            epsilon,
+            critic_lr,
+            actor_lr,
+            critic_update_steps,
+            actor_update_steps,
+            summaries_dir=None
+    ):
+        """
+        PPO constructor
+        :param state_dim: state dimension
+        :param action_dim: action dimension
+        :param epsilon: control surrogate clipping
+        :param critic_lr: gradient descent learning rate for Critic
+        :param actor_lr: gradient descent learning rate for Actor
+        :param critic_update_steps: Critic gradient descent steps for one update
+        :param actor_update_steps: Actor gradient descent steps for one update
+        """
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.epsilon = epsilon
+        self.critic_lr = critic_lr
+        self.actor_lr = actor_lr
+        self.critic_update_steps = critic_update_steps
+        self.actor_update_steps = actor_update_steps
+        self.averaged_reward_global_steps = 0
+        self.actor_global_steps = 0
+        self.critic_global_steps = 0
 
-    part_from_site = (np.argmax(action_ppo) - 1) // 6
-    # print(part_from_site)
-    # print(np.shape(state))
-    while state[0, part_from_site] < 1:
-        if action_ppo[0] == 1:  # no action case
-            break
-        action_ppo = ppo.choose_action(sess=sess, states=state)
-        # action = decode_action_from_action_ppo(action_ppo)
-        part_from_site = (np.argmax(action_ppo) - 1) // 6
-    return action_ppo
+        # TensorFlow summary
+        self.summary_writer = None
+        if summaries_dir:
+            summaries_dir = os.path.join(summaries_dir, 'summaries_{}'.format('ppo'))
+            if not os.path.exists(summaries_dir):
+                os.makedirs(summaries_dir)
+            self.summary_writer = tf.summary.FileWriter(summaries_dir)
 
+        # placeholders
+        self._create_placeholders()
 
-def train(
-        sess,
-        env,
-        ppo,
-        state_processor,
-        experiment_dir,
-):
-    """
-    Train the model
-    :param sess: TensorFlow session
-    :param env: environment
-    :param ppo: proximal policy optimization instance
-    :param state_processor: state processor
-    :param experiment_dir: directory to save TensorFlow checkpoints
-    :return:
-    """
-    # create directories for checkpoints
-    checkpoint_dir = os.path.join(experiment_dir, 'checkpoints')
-    checkpoint_path = os.path.join(checkpoint_dir, 'model')
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
+        # build Critic including network, loss, and train_op
+        with tf.variable_scope('critic'):
+            self._build_critic()
 
-    # TensorFlow saver
-    saver = tf.train.Saver()
+        # build Actor
+        with tf.variable_scope('actor'):
+            pi, pi_params, _ = self._build_actor_network(scope='pi', trainable=True)
+            oldpi, oldpi_params, _ = self._build_actor_network(scope='oldpi', trainable=False)
 
-    # load a previous checkpoint if there is one
-    latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
-    if latest_checkpoint:
-        print('loading model checkpoint {}...\n'.format(latest_checkpoint))
-        saver.restore(sess, latest_checkpoint)
+            # define pi sampling operation
+            with tf.variable_scope('sample_action'):
+                self.sample_op = tf.squeeze(pi.sample(sample_shape=1), axis=0)
+                # print('sample_op shape', self.sample_op.get_shape())
 
-    total_step = 0
-    for ep in range(EPISODE_MAX):
-        # save the model every MODEL_SAVE_EPISODES
-        if ep % MODEL_SAVE_EPISODES == 0:
-            saver.save(tf.get_default_session(), checkpoint_path)
+            # define old pi update operation
+            with tf.variable_scope('update_oldpi'):
+                self.update_oldpi_op = [oldp.assign(p) for p, oldp in zip(pi_params, oldpi_params)]
 
-        # empty the buffers
-        buffer_state, buffer_action, buffer_reward = [], [], []
-        episode_reward = 0
-        episode_length = 1
+            # define Actor loss
+            with tf.variable_scope('loss'):
+                # Here we use surrogate, not KL divergence (https://arxiv.org/abs/1707.06347)
+                with tf.variable_scope('surrogate'):
+                    ratio = pi.prob(self.actions_ph) / oldpi.prob(self.actions_ph)
+                    surrogate = ratio * self.advantages_ph
+                    # then define the loss using clipping
+                    self.actor_loss = -tf.reduce_mean(
+                        tf.minimum(surrogate,
+                                   tf.clip_by_value(ratio,
+                                                    1. - self.epsilon,
+                                                    1 + self.epsilon) * self.advantages_ph
+                                   )
+                    )
+            # define Actor train operation
+            self.actor_train_op = tf.train.AdamOptimizer(self.actor_lr).minimize(
+                self.actor_loss,
+                global_step=tf.train.get_global_step()
+            )
+            self.actor_loss_summary = tf.summary.scalar('actor_loss', self.actor_loss)
 
-        # reset environment
-        state = env.reset()
-        state = state_processor.process(state)
+        self.averaged_reward = tf.summary.scalar('averaged_reward', self.averaged_reward_ph)
 
-        for t in range(EPISODE_LEN):
-            # choose action
-            action_ppo = valid_action(sess=sess, state=state_array, ppo=ppo)
-            # TODO: some processing of the state and action
+    def _create_placeholders(self):
+        """
+        TensorFlow placeholders
+        :return:
+        """
+        self.states_ph = tf.placeholder(dtype=tf.float32, shape=[None, self.state_dim], name='states')
+        self.actions_ph = tf.placeholder(dtype=tf.float32, shape=[None, self.action_dim], name='actions')
+        self.discounted_reward_ph = tf.placeholder(dtype=tf.float32, shape=[None, 1], name='discounted_reward')
+        self.advantages_ph = tf.placeholder(dtype=tf.float32, shape=[None, 1], name='advantages')
+        # averaged reward summary
+        self.averaged_reward_ph = tf.placeholder(dtype=tf.float32, name='averaged_reward')
 
-            # take one step in the environment
-            next_state, reward, done = env.condense_step(state, allocation)
-            next_state = state_processor.process(next_state)
+    def _build_critic(self):
+        """
+        Build Critic - three hidden layers MLP
+        :return:
+        """
+        hid1 = tf.layers.dense(self.states_ph, 150, activation=tf.tanh)
+        hid2 = tf.layers.dense(hid1, 200, activation=tf.tanh)
+        hid3 = tf.layers.dense(hid2, 150, activation=tf.tanh)
+        self.values = tf.layers.dense(hid3, 1, activation=None)
+        self.advantages = self.discounted_reward_ph - self.values
+        self.critic_loss = tf.reduce_mean(tf.square(self.advantages))
+        self.critic_train_op = tf.train.AdamOptimizer(self.critic_lr).minimize(self.critic_loss)
+        self.critic_loss_summary = tf.summary.scalar('critic_loss', self.critic_loss)
 
-            # TODO: some processing of the next_state
+    def _build_actor_network(self, scope, trainable):
+        """
+        Build Actor - three hidden layers MLP
+        :param scope: TensorFlow variable scope
+        :param trainable: boolean, the network to build is trainable or not
+        :return:
+        """
+        with tf.variable_scope(scope):
+            hid1 = tf.layers.dense(self.states_ph, 150, activation=tf.tanh, trainable=trainable)
+            hid2 = tf.layers.dense(hid1, 200, activation=tf.tanh, trainable=trainable)
+            hid3 = tf.layers.dense(hid2, 150, activation=tf.tanh, trainable=trainable)
+            logits = tf.layers.dense(hid3, self.action_dim, activation=None, trainable=trainable)
+            multinomial_dist = tf.distributions.Multinomial(total_count=1., logits=logits)
+        params = tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
+        return multinomial_dist, params, logits
 
-            # accumulate episode reward
-            episode_reward += reward
-            episode_length += 1
-
-            # record the trajectory
-            buffer_state.append(state)
-            buffer_action.append(action_ppo)
-            buffer_reward.append(reward)
-
-            # update ppo if it is the time
-            if (t+1) % BATCH_SIZE == 0 or t == EPISODE_LEN-1:
-                value_ = ppo.get_value(sess=sess, states=next_state_array)
-                # print('value:', value_)
-                discounted_reward = []
-                for r in buffer_reward[::-1]:
-                    value_ = r + GAMMA * value_
-                    discounted_reward.append(value_)
-                discounted_reward.reverse()
-
-                # fabricate batch for training
-                batch_state, batch_action, batch_discounted_reward = np.vstack(buffer_state),\
-                                                                     np.vstack(buffer_action),\
-                                                                     np.vstack(buffer_reward)
-                buffer_state, buffer_action, buffer_reward = [], [], []
-
-                # update the actor and critic networks
-                ppo.update(
-                    sess=sess,
-                    states=batch_state,
-                    actions=batch_action,
-                    discounted_rewards=batch_discounted_reward
-                )
-
-            # print steps
-            print('\rStep {} ({}) @ Episode {}/{}, reward: {}'.format(
-                t, total_step, ep + 1, EPISODE_MAX, reward), end='')
-
-            if done:
-                break
-
-            total_step += 1
-
-        ppo.summary(sess=sess, averaged_reward=episode_reward / episode_length)
-        print('\nAveraged reward for Episode {}'.format(ep), ':', episode_reward / episode_length)
-
-
-# main function
-if __name__ == "__main__":
-    # reset TensorFlow computation graph
-    tf.reset_default_graph()
-
-    # create a TensorFlow global step variable
-    global_step = tf.Variable(0, name='global_step', trainable=False)
-
-    # where to save the checkpoints
-    time_stamp = time.ctime()
-    time_stamp = time_stamp.replace(':', '_')
-    time_stamp = time_stamp.replace(' ', '_')
-    experiment_dir = os.path.abspath('./experiments/{}'.format(time_stamp))
-
-    # create a PPO instance
-    ppo = PPO(
-        state_dim=STATE_DIM,
-        action_dim=ACTION_DIM,
-        epsilon=EPSILON,
-        critic_lr=CRITIC_LR,
-        actor_lr=ACTOR_LR,
-        critic_update_steps=CRITIC_UPDATE_STEPS,
-        actor_update_steps=ACTOR_UPDATE_STEPS,
-        summaries_dir=experiment_dir
-    )
-
-    # create environment
-    env = Environment()
-
-    # create state processor
-    state_processor = StateProcessor()
-
-    # start training...
-    with tf.Session() as sess:
-        sess.run(tf.global_variables_initializer())
-        sess.run(tf.local_variables_initializer())
-
-        # reinforcement learning
-        train(
-            sess=sess,
-            env=env,
-            ppo=ppo,
-            state_processor=state_processor,
-            experiment_dir=experiment_dir
+    def update(self, sess, states, actions, discounted_rewards):
+        """
+        Update both Actor and Critic
+        :param sess: TensorFlow session
+        :param states: states
+        :param actions: actions
+        :param discounted_rewards: discounted rewards
+        :return:
+        """
+        # copy current policy network params to old policy network params
+        sess.run(self.update_oldpi_op)
+        # calculate advantages
+        advantages = sess.run(
+            self.advantages,
+            {self.states_ph: states, self.discounted_reward_ph: discounted_rewards}
         )
+
+        # update Actor, clipping method according to OpenAI's paper
+        for _ in range(self.actor_update_steps):
+            _, actor_loss_summary = sess.run(
+                [self.actor_train_op, self.actor_loss_summary],
+                {self.states_ph: states, self.actions_ph: actions, self.advantages_ph: advantages}
+            )
+            if self.summary_writer:
+                self.summary_writer.add_summary(actor_loss_summary, self.actor_global_steps)
+                self.actor_global_steps += 1
+
+        # update Critic
+        for _ in range(self.critic_update_steps):
+            _, critic_loss_summary = sess.run(
+                [self.critic_train_op, self.critic_loss_summary],
+                {self.states_ph: states, self.discounted_reward_ph: discounted_rewards}
+            )
+            if self.summary_writer:
+                self.summary_writer.add_summary(critic_loss_summary, self.critic_global_steps)
+                self.critic_global_steps += 1
+
+    def choose_action(self, sess, states):
+        """
+        Choose action by Actor
+        :param sess: TensorFlow session
+        :param states: states
+        :return: action of the shape [action_dim]
+        """
+        return sess.run(self.sample_op, {self.states_ph: states})[0]
+
+    def get_value(self, sess, states):
+        """
+        Get value of the state
+        :param sess: TensorFlow session
+        :param states: states
+        :return:
+        """
+        return sess.run(self.values, {self.states_ph: states})[0, 0]
+
+    def summary(self, sess, averaged_reward):
+        """
+        Observe averaged reward by TensorBoard during training
+        :param sess: TensorFlow session
+        :param averaged_reward: averaged reward after each episode
+        :return:
+        """
+        summaries = sess.run(
+            self.averaged_reward,
+            {self.averaged_reward_ph: averaged_reward}
+        )
+        if self.summary_writer:
+            self.summary_writer.add_summary(summaries, global_step=self.averaged_reward_global_steps)
+            self.averaged_reward_global_steps += 1
