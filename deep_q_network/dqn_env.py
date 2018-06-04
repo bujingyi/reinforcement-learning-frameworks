@@ -56,11 +56,10 @@ class StateProcessor:
     def __init__(self):
         # TODO: StateProcessor initializer
 
-    def process(self, state_env):
+    def process(self, state_dict):
         """
-        convert raw environment state to 
-        :param state_env: raw state from environm
+        convert original environment state to 
         :return: an RL state of shape...
         """
-        # TODO: convert the raw state
+        # TODO: convert the original state
         return RL_state

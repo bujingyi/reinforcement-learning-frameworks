@@ -7,6 +7,7 @@ import time
 from ppo_environment import Environment, StateProcessor
 from ppo_model import PPO
 
+
 # global variables
 STATE_DIM = 100
 ACTION_DIM = 100
@@ -22,28 +23,19 @@ EPISODE_LEN = 1000  # max episode length
 MODEL_SAVE_EPISODES = 10
 
 
-def valid_action(sess, state, ppo):
+def valid_action_gen(sess, env, state, ppo):
     """
-    Judge the action is valid or not
+    Generate valid actions
     :param sess: TensorFlow session
+    :param env: RL environment
     :param state: RL state
     :param ppo: an PPO instance
     :return:
     """
     action_ppo = ppo.choose_action(sess=sess, states=state)
-    # action = decode_action_from_action_ppo(action_ppo)
-    if action_ppo[0] == 1:  # no action case
-        return action_ppo
-
-    part_from_site = (np.argmax(action_ppo) - 1) // 6
-    # print(part_from_site)
-    # print(np.shape(state))
-    while state[0, part_from_site] < 1:
-        if action_ppo[0] == 1:  # no action case
-            break
+    # keep sampling action until valid
+    while not env.valid_action(action_ppo):
         action_ppo = ppo.choose_action(sess=sess, states=state)
-        # action = decode_action_from_action_ppo(action_ppo)
-        part_from_site = (np.argmax(action_ppo) - 1) // 6
     return action_ppo
 
 
@@ -57,7 +49,7 @@ def train(
     """
     Train the model
     :param sess: TensorFlow session
-    :param env: environment
+    :param env: RL environment
     :param ppo: proximal policy optimization instance
     :param state_processor: state processor
     :param experiment_dir: directory to save TensorFlow checkpoints
@@ -95,7 +87,7 @@ def train(
 
         for t in range(EPISODE_LEN):
             # choose action
-            action_ppo = valid_action(sess=sess, state=state_array, ppo=ppo)
+            action_ppo = valid_action_gen(sess=sess, state=state_array, ppo=ppo)
             # TODO: some processing of the state and action
 
             # take one step in the environment
