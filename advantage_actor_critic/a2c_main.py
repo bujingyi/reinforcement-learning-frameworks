@@ -29,7 +29,7 @@ def valid_action_gen(sess, env, state, policy_estimator):
     return action
 
 
-def a2c_learning(sess,
+def a2c_train(sess,
                  env,
                  policy_estimator,
                  value_estimator,
@@ -169,7 +169,7 @@ if __name__ == '__main__':
     # training
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
-        a2c_learning(
+        a2c_train(
             sess=sess,
             env=env,
             policy_estimator=actor,

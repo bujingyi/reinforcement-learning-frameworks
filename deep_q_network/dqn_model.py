@@ -71,7 +71,7 @@ class DQN:
         # Optimizer
         self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
         self.train_op = self.optimizer.minimize(self.loss, global_step=tf.train.get_global_step())
-
+ 
         # summaries
         self.summaries = tf.summary.merge([
             tf.summary.scalar('loss', self.loss),
@@ -94,7 +94,7 @@ class DQN:
     def update(self, sess, s, a, q, save):
         """
         Updates the estimator towards the given targets
-        :param sess: tensorflow session
+        :param sess: TensorFlow session
         :param s: state input of shape [batch_size, self.state_dim]
         :param a: selected actions of shape[batch_size, self.action_dim]
         :param q: target values of shape [batch_size]
