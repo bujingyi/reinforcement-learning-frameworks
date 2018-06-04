@@ -4,7 +4,6 @@ import numpy as np
 import os
 import time
 
-from allocation.allocation import Allocation
 from ppo_environment import Environment, StateProcessor
 from ppo_model import PPO
 

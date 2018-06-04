@@ -18,7 +18,7 @@ class PPO:
             summaries_dir=None
     ):
         """
-        PPO constructor
+        PPO initializer
         :param state_dim: state dimension
         :param action_dim: action dimension
         :param epsilon: control surrogate clipping
