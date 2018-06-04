@@ -7,6 +7,7 @@ from collections import namedtuple
 
 from dqn_utils import ReplayMemory
 
+
 def valid_action_gen(sess, env, state):
     """
     Generate valid actions list

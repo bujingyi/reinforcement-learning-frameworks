@@ -1,11 +1,11 @@
 import tensorflow as tf
 import numpy as np
-
 import os
 import time
 
-from ppo_environment import Environment, StateProcessor
+from env import Environment
 from ppo_model import PPO
+from ppo_utils import StateProcessor
 
 
 # global variables

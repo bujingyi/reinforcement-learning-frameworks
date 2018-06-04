@@ -1,13 +1,9 @@
-
 class Environment:
     """
     Reinforcement learning environment
     """
     def __init__(self):
         # TODO: Environment initializer
-
-        self.state_processor = StateProcessor()
-
         # initialize the environment
         self.init_state = self.reset()
 

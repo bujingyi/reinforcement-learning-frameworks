@@ -2,7 +2,7 @@ import tensorflow as tf
 import os
 import time
 
-from dqn_env import Environment
+from env import Environment
 from dqn_utils import StateProcessor
 
 
