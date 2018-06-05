@@ -34,7 +34,6 @@ class DQN:
                     os.makedirs(summaries_dir)
                 self.summary_writer = tf.summary.FileWriter(summaries_dir)
 
-    # build the graph
     def _build_model(self):
         """
         Build the computation graph
