@@ -11,9 +11,9 @@ class DQN:
     		self, 
     		state_dim,
             action_dim,
-    		scope='estimator', 
-    		lr_init=0.0001, 
-    		lr_dacay_step=10000, 
+    		scope='estimator',
+    		lr_init=0.0001,
+    		lr_dacay_step=10000,
     		lr_decay_rate=0.9, 
     		summaries_dir=None
     ):
